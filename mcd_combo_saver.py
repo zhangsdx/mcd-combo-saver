@@ -28,12 +28,31 @@ PROTOCOL_VERSION = "2024-11-05"
 
 # ---------------------------------------------------------------------------
 # 关键词（真实菜单无显式“辣/饮料”字段，基于名称 + 分类 + 标签启发式判定）
+#
+# 经验值全部来自 2026-10-22 门店 1420450 的真实菜单（96 项 / 15 分类）核对。
+# 注意：不要用「水 / 茶 / 奶 / 汁 / 酷」这类单字做饮料判定，会误伤
+#      「水果」「奶茶味酱」等；真实菜单里所有饮品都能由分类名「饮品 / 麦咖啡」命中。
 # ---------------------------------------------------------------------------
-SPICY_KW = ["辣", "麻辣", "香辣", "辣椒", "火辣", "川辣", "酸辣"]
-DRINK_KW = ["可乐", "雪碧", "橙汁", "果汁", "咖啡", "茶", "奶", "汽水", "柠檬",
-            "美年达", "芬达", "椰", "豆浆", "苏打", "水", "冰红", "拿铁", "奶绿",
-            "麦炫酷", "美汁源", "纯牛奶", "燕麦奶", "饮", "汁", "酷"]
-COMBO_NM = ["套餐", "件套", "分享餐", "单人餐", "双人", "多人餐", "拼盘"]
+SPICY_KW = ["辣", "麻辣", "香辣", "辣椒", "火辣", "川辣", "酸辣", "龙焰", "甜辣"]
+DRINK_KW = ["可乐", "雪碧", "芬达", "美年达", "咖啡", "拿铁", "奶铁", "红茶",
+            "绿茶", "橙汁", "果汁", "苹果汁", "牛奶", "燕麦奶", "豆浆", "雪冰",
+            "麦炫酷", "美汁源", "柠檬茶", "汽水", "矿泉水", "饮品", "怡泉"]
+# 名称里的「强套餐词」——命中即视为整份套餐，不再按单品处理
+COMBO_NM = ["套餐", "件套", "分享餐", "单人餐", "双人餐", "多人餐",
+            "乐园餐", "随心配", "随心选", "随心拼", "拼盘"]
+# 甜品类：必须与「小食」分开，否则会拿冰淇淋冒充正餐去凑“吃饱实惠”
+DESSERT_KW = ["圆筒", "麦旋风", "圣代", "新地", "冰淇淋", "甜筒", "苹果派",
+              "菠萝派", "香芋派", "红豆派"]
+# 小食类（名称）
+SNACK_KW = ["鸡块", "麦乐鸡", "鸡翅", "鸡排", "鸡米花", "鸡柳", "洋葱圈",
+            "薯条", "薯", "玉米", "炸鸡", "脆汁鸡", "麦麦脆",
+            "小食盘", "四宫格", "扭扭"]
+# 周边 / 非餐品：真实菜单里混有「麦当劳限定丝巾」，绝不能进餐单
+NONFOOD_KW = ["丝巾", "玩偶", "玩具", "徽章", "帆布袋", "周边", "礼品卡",
+              "手提袋", "餐盒", "盲盒", "摆件"]
+# 限购/身份限定商品：如「学生专享饮品随心选」需学生身份才能下单，
+# 默认不参与推荐，否则会给出「买不到」的方案。
+RESTRICTED_KW = ["学生专享"]
 
 # ---------------------------------------------------------------------------
 # Mock 样例菜单（近似值，仅用于无 Token 时演示算法；真实数据来自 query-meals）
@@ -73,41 +92,49 @@ MOCK_NUTRITION = {
 # ---------------------------------------------------------------------------
 # 组合优化核心算法（与是否联网无关，纯逻辑，可单测）
 # ---------------------------------------------------------------------------
-def build_combos(menu, budget, spicy_ok, must_drink):
-    allowed = [m for m in menu if (spicy_ok or "辣" not in m["tags"])]
+def build_combos(menu, budget, spicy_ok, must_drink, include_restricted=False):
+    """枚举预算内所有合规组合。
+
+    must_drink=True  ：只生成「含饮料」的组合（主食+饮料 / 主食+小食+饮料），
+                      套餐本身含饮料，始终合法。
+    must_drink=False ：只生成「不含饮料」的组合（单主食 / 主食+小食），
+                      让 --no-drink 真正生效（旧版无论开关都会塞饮料组合）。
+    include_restricted：是否允许「学生专享」这类需身份验证的商品加入。
+
+    甜品不参与自动组合：旧版把甜品当「小食」并允许加在套餐后，
+    导致「吃饱实惠」用 ¥5 圆筒冰淇淋凑预算，语义错误。
+    """
+    allowed = [m for m in menu
+               if m.get("price", 0) > 0
+               and (spicy_ok or "辣" not in m["tags"])
+               and (include_restricted or not m.get("restricted"))]
     mains = [m for m in allowed if m["cat"] == "主食"]
     sides = [m for m in allowed if m["cat"] == "小食"]
     drinks = [m for m in allowed if m["cat"] == "饮料"]
-    combos_cat = [m for m in allowed if m["cat"] == "套餐"]
-    desserts = [m for m in allowed if m["cat"] == "甜品"]
+    setmeals = [m for m in allowed if m["cat"] == "套餐"]
 
     combos = []
-    for c in combos_cat:                      # 套餐
+    for c in setmeals:                        # 套餐：自带主食+小食+饮料
         if c["price"] <= budget:
             combos.append([c])
-    for m in mains:                           # 主食 + 饮料
-        for d in drinks:
-            if m["price"] + d["price"] <= budget:
-                combos.append([m, d])
-    for m in mains:                           # 主食 + 小食 + 饮料
-        for s in sides:
+    if must_drink:
+        for m in mains:                       # 主食 + 饮料
             for d in drinks:
-                if m["price"] + s["price"] + d["price"] <= budget:
-                    combos.append([m, s, d])
-    if not must_drink:                        # 主食 + 小食（无饮料）
-        for m in mains:
+                if m["price"] + d["price"] <= budget:
+                    combos.append([m, d])
+        for m in mains:                       # 主食 + 小食 + 饮料
+            for s in sides:
+                for d in drinks:
+                    if m["price"] + s["price"] + d["price"] <= budget:
+                        combos.append([m, s, d])
+    else:
+        for m in mains:                       # 只有主食
+            if m["price"] <= budget:
+                combos.append([m])
+        for m in mains:                       # 主食 + 小食
             for s in sides:
                 if m["price"] + s["price"] <= budget:
                     combos.append([m, s])
-    # 允许用结余加一份甜品（升级版）
-    extended = []
-    for combo in combos:
-        extended.append(combo)
-        base = sum(x["price"] for x in combo)
-        for de in desserts:
-            if base + de["price"] <= budget:
-                extended.append(combo + [de])
-    combos = extended
 
     def score(combo):
         cats = set(x["cat"] for x in combo)
@@ -136,52 +163,95 @@ def _combo_meta(combo, nutrition):
     return price, cats, kcal, protein
 
 
-def recommend(menu, budget, people, spicy_ok, must_drink, nutrition=None):
-    nutrition = nutrition or {}
-    all_combos = build_combos(menu, budget, spicy_ok, must_drink)
+# 标准「套餐」词——用于「套餐省事」策略。故意不含「随心配/随心选」：
+# 那两个是 1+1 自选组合，跟三件套/四件套不是一类，混在一起会出现
+# 「方案1 精选超值随心配 ¥13.9 / 方案2 人气经典随心配 ¥14.9」这种同质化推荐。
+STRONG_SETMEAL_KW = ["套餐", "件套", "分享餐", "单人餐", "双人餐", "多人餐", "乐园餐"]
 
-    def score(combo):
-        _, cats, _, _ = _combo_meta(combo, nutrition)
-        items = len(combo)
-        price = sum(x["price"] for x in combo)
-        return (items * 1.0 + len(cats) * 0.8) / price
+
+def _is_real_setmeal(name):
+    """名称里带标准套餐词才算「真套餐」（排除 1+1 随心配、随心选这类自选组合）。"""
+    return any(k in (name or "") for k in STRONG_SETMEAL_KW)
+
+
+def recommend(menu, budget, people, spicy_ok, must_drink, nutrition=None,
+              include_restricted=False):
+    nutrition = nutrition or {}
+    all_combos = build_combos(menu, budget, spicy_ok, must_drink, include_restricted)
 
     def _has(combo, cat):
         return any(x["cat"] == cat for x in combo)
 
-    # A 极致省钱：非套餐、含主食+饮料的达标组合里，价格最低（花最少的钱吃一顿正经饭）
-    达标_pool = [c for c in all_combos
-                 if not _has(c, "套餐") and _has(c, "主食") and _has(c, "饮料")]
-    达标_pool.sort(key=lambda c: sum(x["price"] for x in c))
-    # B 套餐省事：优先「真套餐」（名称含 套餐/件套/分享餐），没有再退回任意带套餐标签的组合；取最便宜
-    combo_all = [c for c in all_combos if _has(c, "套餐")]
-    combo_real = [c for c in combo_all
-                  if any(("套餐" in i["name"] or "件套" in i["name"] or "分享餐" in i["name"]) for i in c)]
-    combo_pool = combo_real or combo_all
-    combo_pool.sort(key=lambda c: sum(x["price"] for x in c))
-    # C 吃饱实惠：不含套餐/甜品、含主食+饮料，价格最高（最丰盛、最接近预算）
-    hearty_pool = [c for c in all_combos
-                   if not _has(c, "套餐") and not _has(c, "甜品")
-                   and _has(c, "主食") and _has(c, "饮料")]
-    hearty_pool.sort(key=lambda c: sum(x["price"] for x in c), reverse=True)
+    def _price(combo):
+        return sum(x["price"] for x in combo)
 
-    picks, labels = [], []
-    if 达标_pool:
-        picks.append(达标_pool[0]); labels.append("极致省钱")
-    if combo_pool:
-        picks.append(combo_pool[0]); labels.append("套餐省事")
-    if hearty_pool:
-        picks.append(hearty_pool[0]); labels.append("吃饱实惠")
+    def _key(combo):
+        return tuple(sorted(x["code"] for x in combo))
 
-    seen, results = set(), []
+    def _ok(combo):
+        """合规下限：不含甜品/周边；有主食（或整份套餐）；饮料按开关判断。"""
+        if _has(combo, "甜品") or _has(combo, "其他"):
+            return False
+        if not (_has(combo, "主食") or _has(combo, "套餐")):
+            return False
+        if must_drink and not (_has(combo, "饮料") or _has(combo, "套餐")):
+            return False
+        return True
+
+    def _coverage(combo):
+        """品类覆盖数。套餐内部已含主食+小食+饮料，按 3 个品类计，
+        否则一份三件套（只算"套餐"1 类）会输给「主食+小食」而被判为不够丰盛。"""
+        cats = set()
+        for x in combo:
+            if x["cat"] == "套餐":
+                cats.update(["主食", "小食", "饮料"])
+            else:
+                cats.add(x["cat"])
+        return len(cats)
+
+    ok_pool = [c for c in all_combos if _ok(c)]
+
+    # A 极致省钱：**全场**（含套餐）价格最低——否则会出现「极致省钱 ¥23.5」
+    #   比「套餐省事 ¥13.9」还贵的自相矛盾（旧版只在单点组合里找最低）
+    cheapest = sorted(ok_pool, key=_price)
+    # B 套餐省事：真套餐里最便宜（跳过与 A 重复的那一份）
+    setmeals = sorted([c for c in all_combos
+                       if _has(c, "套餐") and any(_is_real_setmeal(i["name"]) for i in c)],
+                      key=_price)
+    # C 吃饱实惠：品类覆盖优先（先保证有主食+小食+饮料），同覆盖下价格越高越贴预算，
+    #   避免旧版出现「鳕鱼堡+纯牛奶」这种只有 2 个品类却叫“吃饱”的方案。
+    #   排除套餐：套餐已有独立策略「套餐省事」，否则两个方案会撞成同一类。
+    heartiest = sorted([c for c in ok_pool if not _has(c, "套餐")],
+                       key=lambda c: (_coverage(c), _price(c)),
+                       reverse=True)
+
+    picks, labels, used = [], [], set()
+
+    def _push(combo, label):
+        k = _key(combo)
+        if k in used:
+            return False
+        used.add(k)
+        picks.append(combo)
+        labels.append(label)
+        return True
+
+    if cheapest:
+        _push(cheapest[0], "极致省钱")
+    for c in setmeals:
+        if _key(c) not in used:
+            _push(c, "套餐省事")
+            break
+    for c in heartiest:
+        if _key(c) not in used:
+            _push(c, "吃饱实惠")
+            break
+
+    results = []
     for combo, label in zip(picks, labels):
-        key = tuple(sorted(x["code"] for x in combo))
-        if key in seen:
-            continue
-        seen.add(key)
         price, cats, kcal, protein = _combo_meta(combo, nutrition)
         results.append({
-            "rank": len(results) + 1,
+            "rank": 0,
             "label": label,
             "items": [{"name": x["name"], "price": x["price"], "cat": x["cat"], "code": x["code"]} for x in combo],
             "subtotal": price,
@@ -192,16 +262,25 @@ def recommend(menu, budget, people, spicy_ok, must_drink, nutrition=None):
             "kcal": kcal,
             "protein": protein,
         })
+
+    # 按价格升序重排并重编号：三个方案的标签是「策略名」不是「名次」，
+    # 若不按价格排序会出现「方案2 ¥41」排在「方案3 ¥37」前面这种倒挂。
+    results.sort(key=lambda r: (r["payable"], r["subtotal"]))
+    for i, r in enumerate(results, 1):
+        r["rank"] = i
     return results
 
 
-def render(results, total_budget, people, spicy_ok, must_drink, real=False):
+def render(results, total_budget, people, spicy_ok, must_drink, real=False, coupon_count=0):
     per_cap = total_budget / people
     print("=" * 60)
     print(f"麦门省钱组合器 · 总预算 ¥{total_budget} · {people} 人 · 人均上限 ¥{per_cap:.1f} · "
           f"{'不辣' if not spicy_ok else '可辣'} · {'必含饮料' if must_drink else '可无饮料'}")
     if real:
         print("数据源: 麦当劳 MCP 实时拉取（query-nearby-stores / query-meals / calculate-price）")
+        coupon_note = (f"该门店有 {coupon_count} 张券可选用（本工具不代领券，"
+                       f"到手价为未叠券核价）" if coupon_count else "该门店当前无可用优惠券")
+        print(f"计价口径: {coupon_note}")
     print("=" * 60)
     for r in results:
         total = r["payable"] * people
@@ -212,7 +291,10 @@ def render(results, total_budget, people, spicy_ok, must_drink, real=False):
         for it in r["items"]:
             print(f"   - {it['name']:<18} ¥{it['price']}  [{it['cat']}]")
         nut = f"  营养: ~{r['kcal']} kcal / {r['protein']}g 蛋白" if r['kcal'] else ""
-        print(f"  品类覆盖: {','.join(r['categories'])}{nut}")
+        setmeal_note = "（套餐内已含小食与饮料）" if "套餐" in r["categories"] else ""
+        print(f"  品类覆盖: {','.join(r['categories'])}{setmeal_note}{nut}")
+        if any(("随心配" in it["name"] or "随心选" in it["name"]) for it in r["items"]):
+            print("  注: 「随心配/随心选」需在门店选定具体商品，此处只锁定活动价档位。")
         print(f"  ×{people} 人整单约 ¥{total:.1f}（外送可能含配送费），整单结余 ¥{total_save:.1f}")
     if results:
         best = results[0]
@@ -220,10 +302,15 @@ def render(results, total_budget, people, spicy_ok, must_drink, real=False):
         print(f"结论: 最推荐【方案 {best['rank']}·{best['label']}】，"
               f"{'、'.join(i['name'] for i in best['items'])}，人均到手约 ¥{best['payable']}。")
         if len(results) > 1:
-            alt = results[1]
-            print(f"想更省事可选【方案 {alt['rank']}·{alt['label']}】；想更管饱可选其余方案。")
+            others = "；".join(f"【方案 {r['rank']}·{r['label']}】¥{r['payable']}"
+                              for r in results[1:])
+            print(f"其它可选：{others}。")
         if not real:
             print("（mock 演示价；真实到手价请以 calculate-price 核价结果为准）")
+    else:
+        print(f"\n[无方案] 人均预算 ¥{per_cap:.1f} 不足以组成一餐"
+              f"（{'需含饮料' if must_drink else '可不含饮料'}）。建议放宽预算、"
+              f"或加 --no-drink 去掉饮料要求后重试。")
     print("-" * 60)
 
 
@@ -303,25 +390,63 @@ class McdMCP:
 # ---------------------------------------------------------------------------
 # 真实数据解析（依据麦当劳 MCP 返回的 structuredContent 结构）
 # ---------------------------------------------------------------------------
-def _classify(name, cat_name, tags):
+def _classify(name, cat_names, tags, price=0.0):
+    """把真实菜单项归类为 套餐/主食/小食/饮料/甜品/其他。
+
+    cat_names：该项出现的**全部**分类名（真实菜单里一件商品常同时挂在
+    「人气热卖」和「小食甜品\\n/其他」下，只取第一个分类会判错，
+    例如「麦当劳限定丝巾」会因首个分类是「人气热卖」而落入默认「主食」）。
+
+    判定顺序（从强到弱，顺序本身就是业务规则）：
+      周边 → 酱料 → 饮品类 → 名称套餐词 → 名称饮品词 → 名称甜品词
+      → 名称小食词 → 分类兜底 → 默认主食
+    """
     name = name or ""
-    cat_name = cat_name or ""
-    # 酱料/蘸料类（非正餐）不参与组合
-    if ("酱" in name or "蘸" in name) and not any(w in name for w in ["鸡", "堡", "肉", "鱼", "虾", "排", "卷"]):
+    cats = [c for c in (cat_names or []) if c]
+    blob = " ".join(cats)
+    tags = tags or []
+
+    # 1) 周边非餐品
+    if any(k in name for k in NONFOOD_KW):
         return "其他"
-    if "套餐" in (tags or []):
-        return "套餐"
-    if any(k in name for k in COMBO_NM) or "餐" in cat_name or "拼盘" in cat_name:
-        return "套餐"
-    if "饮品" in cat_name or "麦咖啡" in cat_name:
+
+    # 2) 酱料/蘸料（低价且名称以「酱」结尾，或标签就是「蘸酱」）
+    #    注意不能只看「含酱字」——「蘸酱炸鸡」「蘸酱四宫格」是正经餐品
+    if price <= 6 and (name.endswith("酱") or "蘸酱" in tags):
+        return "其他"
+
+    # 3) 饮品类（真实菜单里「饮品」「麦咖啡™」两个分类 100% 是饮料，
+    #    必须先于套餐词判定，否则「学生专享饮品随心选」会被当成套餐）
+    if "饮品" in blob or "麦咖啡" in blob:
         return "饮料"
+
+    # 4) 名称含强套餐词（整份套餐，内部已含主食/小食/饮料）
+    #    额外：名称以「餐」结尾也算套餐——真实菜单里「麦辣小食餐」「板烧小食餐」
+    #    「汉堡开心乐园餐」「鱼排堡开心乐园餐」都以「餐」结尾，逐个加词不可维护。
+    #    已核对：没有任何单品主食以「餐」结尾。
+    if any(k in name for k in COMBO_NM) or name.endswith("餐"):
+        return "套餐"
+
+    # 5) 名称含饮品词
     if any(k in name for k in DRINK_KW):
         return "饮料"
-    if "小食" in cat_name or "甜品" in cat_name:
+
+    # 6) 名称含甜品词（必须早于小食词，否则圆筒/麦旋风会被当成小食）
+    #    真实菜单里「派」的品名就叫单字「派」，故补 endswith 判断
+    if any(k in name for k in DESSERT_KW) or name.endswith("派"):
+        return "甜品"
+
+    # 7) 名称含小食词
+    if any(k in name for k in SNACK_KW):
         return "小食"
-    if any(k in name for k in ["冰淇淋", "麦旋风", "圣代", "薯", "鸡块", "鸡翅",
-                                "鸡排", "派", "扭扭", "玉米", "炸鸡"]):
-        return "小食"
+
+    # 8) 分类兜底（「炸鸡」分类下的都是小食，如「麦麦脆汁鸡1块」）
+    if "小食" in blob or "甜品" in blob or "炸鸡" in blob:
+        return "甜品" if ("甜品" in blob and "小食" not in blob and "炸鸡" not in blob) else "小食"
+    if "单人餐" in blob or "多人餐" in blob or "套餐" in blob or "乐园" in blob:
+        return "套餐"
+
+    # 9) 默认：汉堡/卷/堡类
     return "主食"
 
 
@@ -352,14 +477,16 @@ def _parse_meals(resp):
         data = sc.get("data", {}) if isinstance(sc, dict) else {}
         cats = data.get("categories", [])
         meals = data.get("meals", {})
-        code_tags, code_cat = {}, {}
+        code_tags, code_cats = {}, {}
         for c in cats:
-            cn = c.get("name", "")
+            cn = (c.get("name") or "").strip()
             for m in c.get("meals", []):
                 code = m.get("code")
                 if code:
                     code_tags.setdefault(code, []).extend(m.get("tags", []))
-                    code_cat.setdefault(code, cn)
+                    bucket = code_cats.setdefault(code, [])
+                    if cn and cn not in bucket:      # 收集全部分类名，不只第一个
+                        bucket.append(cn)
         out = []
         for code, m in meals.items():
             name = m.get("name", "")
@@ -367,11 +494,16 @@ def _parse_meals(resp):
                 price = float(m.get("currentPrice") or m.get("originalPrice") or 0)
             except Exception:
                 price = 0.0
+            if price <= 0:                            # 无价商品不参与组合，避免 0 元污染
+                continue
             tags = list(code_tags.get(code, []))
-            cat = _classify(name, code_cat.get(code, ""), tags)
+            cat_names = code_cats.get(code, [])
+            cat = _classify(name, cat_names, tags, price)
             if _is_spicy(name, tags) and "辣" not in tags:
                 tags.append("辣")
-            out.append({"code": code, "name": name, "cat": cat, "price": price, "tags": tags})
+            restricted = any(k in name for k in RESTRICTED_KW)
+            out.append({"code": code, "name": name, "cat": cat, "price": price,
+                        "tags": tags, "cats": cat_names, "restricted": restricted})
         return out
     except Exception as e:
         print(f"[警告] 解析真实菜单失败：{e}")
@@ -379,29 +511,52 @@ def _parse_meals(resp):
 
 
 def fetch_real_menu(token, city, keyword="", search_type=2, be_type=1, store_code=None):
-    """调用真实 MCP 拉取门店与菜单，返回 (menu, store_code, mcp)。失败抛错。"""
+    """调用真实 MCP 拉取门店与菜单，返回 (menu, store_code, mcp)。失败抛错。
+
+    实测（2026-10-22）：query-nearby-stores 在 searchType=2 时 keyword **不能为空**，
+    传空字符串或无 keyword 一律返回空列表；把城市名当 keyword 才能命中。
+    因此这里做三级回退：给定 keyword → 城市名 → 裸查。
+    """
     mcp = McdMCP(token)
     mcp.initialize()
     if not store_code:
-        stores = mcp.call("query-nearby-stores",
-                          {"beType": be_type, "searchType": search_type, "city": city, "keyword": keyword})
-        store_code = _first_store_code(stores)
-    if not store_code:
-        raise RuntimeError("未从 query-nearby-stores 获取到门店编码")
+        tried, seen = [], []
+        for kw in [keyword, city, ""]:
+            if kw in seen:
+                continue
+            seen.append(kw)
+            stores = mcp.call("query-nearby-stores",
+                              {"beType": be_type, "searchType": search_type,
+                               "city": city, "keyword": kw})
+            store_code = _first_store_code(stores)
+            tried.append(f"keyword={kw or '(空)'}")
+            if store_code:
+                break
+        if not store_code:
+            raise RuntimeError("未找到门店（已尝试 " + " / ".join(tried) +
+                               "），请用 --keyword 指定位置，如 福田、南山")
     meals = mcp.call("query-meals", {"storeCode": store_code, "orderType": 1, "beType": 1})
     menu = _parse_meals(meals)
     return menu, store_code, mcp
 
 
-def price_combo(mcp, store_code, combo):
+def price_combo(mcp, store_code, combo, quantity=1):
     """调 calculate-price 核价，返回 (payable元, discount元) 或 None。
-    注：麦当劳 calculate-price 返回的金额单位为「分」。"""
-    items = [{"productCode": x["code"], "quantity": 1} for x in combo]
+
+    注意：麦当劳 calculate-price 返回的金额单位是「分」，必须 /100。
+    同一商品出现多次时按 quantity 合并，不重复下单行。
+    """
+    cnt = {}
+    for x in combo:
+        cnt[x["code"]] = cnt.get(x["code"], 0) + 1
+    items = [{"productCode": c, "quantity": n * quantity} for c, n in cnt.items()]
     resp = mcp.call("calculate-price",
                     {"storeCode": store_code, "orderType": 1, "beType": 1,
                      "items": items, "needTableware": False})
     sc = _sc(resp)
-    if not sc:
+    # 服务端失败时返回 {"success": false, "code": 60006, "message": "商品已售罄或不可售"}
+    # 且不带 data 字段；必须显式判 success，否则可能把缺失字段当 0 元
+    if not sc or sc.get("success") is False:
         return None
     data = sc.get("data", {})
     if not isinstance(data, dict):
@@ -411,6 +566,19 @@ def price_combo(mcp, store_code, combo):
     if payable is None:
         return None
     return float(payable) / 100.0, float(discount or 0) / 100.0
+
+
+def count_store_coupons(mcp, store_code):
+    """返回该门店可用券数量；查询失败按 0 处理（不阻塞主流程）。"""
+    try:
+        resp = mcp.call("query-store-coupons",
+                        {"storeCode": store_code, "beType": 1, "orderType": 1})
+        sc = _sc(resp)
+        if isinstance(sc, dict) and isinstance(sc.get("data"), list):
+            return len(sc["data"])
+    except Exception:
+        pass
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +594,8 @@ def main():
     ap.add_argument("--city", default="深圳", help="定位城市（真实模式）")
     ap.add_argument("--keyword", default="", help="位置关键词，如 福田（真实模式）")
     ap.add_argument("--store", default="", help="指定门店编码，跳过门店搜索（真实模式）")
+    ap.add_argument("--student", action="store_true",
+                    help="允许「学生专享」类需身份验证的商品参与推荐（默认排除）")
     args = ap.parse_args()
 
     spicy_ok = not args.no_spicy
@@ -450,8 +620,11 @@ def main():
     else:
         print("[提示] 未检测到 MCD_MCP_TOKEN，自动使用 mock 演示模式。\n")
 
-    results = recommend(menu, per_cap, args.people, spicy_ok, must_drink)
+    results = recommend(menu, per_cap, args.people, spicy_ok, must_drink,
+                        include_restricted=args.student)
+    coupon_count = 0
     if real and mcp and store_code:
+        coupon_count = count_store_coupons(mcp, store_code)
         for r in results:
             p = price_combo(mcp, store_code, [{"code": i["code"]} for i in r["items"]])
             if p:
@@ -459,7 +632,17 @@ def main():
                 r["payable"] = round(payable, 2)
                 r["coupon"] = round(discount, 2) if discount else None
                 r["savings"] = round(per_cap - payable, 2)
-    render(results, args.budget, args.people, spicy_ok, must_drink, real=real)
+            else:
+                # 核价失败必须留痕：不能让「菜单小计」冒充「真实到手价」
+                r["priced"] = False
+                print(f"[警告] 方案 {r['rank']}（{r['label']}）calculate-price 核价失败，"
+                      f"展示值为菜单小计，仅供参考。\n")
+        # 真核价可能带回优惠导致价格变化，按最终到手价重排一次
+        results.sort(key=lambda r: (r["payable"], r["subtotal"]))
+        for i, r in enumerate(results, 1):
+            r["rank"] = i
+    render(results, args.budget, args.people, spicy_ok, must_drink,
+           real=real, coupon_count=coupon_count)
 
 
 if __name__ == "__main__":

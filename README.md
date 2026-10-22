@@ -61,11 +61,25 @@ cp -r . ~/.workbuddy/skills/mcd-combo-saver
 ### 4.（可选）命令行体验
 
 ```bash
-pip install -r requirements.txt
-export MCD_MCP_TOKEN=你的Token        # 真实模式；不填则用 --mock 演示
+pip install -r requirements.txt              # 实际零第三方依赖（仅标准库 urllib）
+export MCD_MCP_TOKEN=你的Token                # 真实模式；不填则自动降级 mock 演示
 python mcd_combo_saver.py --mock --budget 40 --people 1
-python mcd_combo_saver.py --mock --budget 80 --people 2 --no-spicy
+python mcd_combo_saver.py --budget 40 --keyword 福田        # 真实模式
+python mcd_combo_saver.py --budget 60 --people 2 --no-spicy # 2 人 60 元，不吃辣
+python mcd_combo_saver.py --budget 45 --no-drink            # 不必含饮料
+python mcd_combo_saver.py --budget 40 --student             # 允许学生专享品参与
 ```
+
+| 参数 | 说明 |
+|---|---|
+| `--budget` | 必填，**整单总额**（元）；人均上限 = 总预算 / 人数 |
+| `--people` | 用餐人数，默认 1 |
+| `--no-spicy` | 排除辣品（按名称+标签启发式识别，含「龙焰」「甜辣」等） |
+| `--no-drink` | 不必含饮料：只枚举「单主食 / 主食+小食」组合 |
+| `--city` / `--keyword` | 定位（默认 深圳）；关键词缺省时自动用城市名兜底 |
+| `--store` | 直接指定门店编码，跳过门店搜索 |
+| `--student` | 允许「学生专享」类需身份验证的商品（默认排除，避免推荐买不到的方案） |
+| `--mock` | 用内置样例菜单演示，不访问官方接口 |
 
 ## 五、使用示例（对话）
 
@@ -90,12 +104,28 @@ mcd-combo-saver/
 ├── mcp-config.example.json     # 脱敏 MCP 配置（仅环境变量占位符）
 ├── workbuddy.md                # WorkBuddy 开发上下文（专项奖励核验）
 ├── requirements.txt
-└── .env.example
+├── .env.example
+└── tests/
+    └── e2e_check.py            # 双门店端到端回归（分类/组合/核价/排序四项断言）
 ```
 
 ## 七、真实调用验证
 
-本 Skill 已通过**真实麦当劳 MCP Token 端到端验证**（非 mock）：实时拉取深圳福田门店 **96 个在售餐品 / 15 分类**，并用官方 `calculate-price` 核出真实应付（示例：不素之霸 + 纯牛奶 → ¥37.5）。完整验证链路与核价记录见 [MCP_INTEGRATION.md §5](./MCP_INTEGRATION.md)。
+已用真实麦当劳 MCP Token 完成**双门店端到端回归**，可复现：`python tests/e2e_check.py`
+
+| 门店 | 餐品数 | 分类分布 |
+|---|---|---|
+| 深圳福田（1420450） | 96 | 套餐 40 / 主食 15 / 饮料 21 / 小食 11 / 甜品 6 / 其他 3 |
+| 深圳北站（1420227） | 83 | 套餐 28 / 主食 12 / 饮料 19 / 小食 16 / 甜品 7 / 其他 1 |
+
+**验证结论**：28 条人工核对分类断言全部通过；6 组预算×人数×约束下所有方案的 `calculate-price` 核价与菜单小计无差异；无重复、不超预算、不辣/必含饮料约束全部成立；方案按到手价单调递增。
+**同城不同店价格不同**（北站店为交通枢纽定价，同款可乐 ¥11.5 vs 福田 ¥9.5）—— 这正是不编造价格、坚持实时拉菜单的价值。
+
+### 已知限制（诚实披露）
+
+- **到手价为「未叠加优惠券」的核价结果**：官方 `calculate-price` 入参没有优惠券字段，券需在 App 内手动选用。输出会显式标注该门店券数量（当前两家门店均无可用券）。
+- **套餐内部构成由官方定义**，接口不返回套餐拆分，因此「含小食/饮料」按套餐语义标注，不拆成单品计价。
+- **辣度/品类为启发式判定**：真实菜单无 `isSpicy` / `category` 标准化字段，本项目按「全部分类名 + 标签 + 品名」三层规则判定，已用两店 179 个品项逐一核对（见 `tests/e2e_check.py` 断言）。
 
 ## 八、免责声明
 
