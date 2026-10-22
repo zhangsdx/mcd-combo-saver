@@ -1,1 +1,3 @@
-requests>=2.31.0
+# 零第三方依赖
+# 参考 CLI（mcd_combo_saver.py）仅使用 Python 标准库（urllib）。
+# 真实模式与 mock 模式均无需 pip install 任何包即可运行。

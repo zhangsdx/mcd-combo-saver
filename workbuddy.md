@@ -40,7 +40,18 @@ $ python mcd_combo_saver.py --mock --budget 40 --people 1
 结论: 最推荐【方案 1】...
 ```
 
-## 5. 合规与发布
+## 5. 真实 MCP 端到端验证（2026-10-22）
+
+为佐证「真实使用麦当劳 MCP」（大赛与 WorkBuddy 专项奖励核验要求），已用真实 Token 在 WorkBuddy 沙箱完成端到端调用：
+
+- `query-nearby-stores`（深圳·福田）→ 真实门店 `1420450`；`query-meals` → **96 个在售餐品 / 15 分类**；
+- `calculate-price` 核价（金额单位「分」，已换算为元）：不素之霸双层牛堡 + 纯牛奶 → 返回 `price=3750` 分 = **¥37.5**；
+- 端到端输出三方案：极致省钱 ¥23.4 / 套餐省事 ¥22.9 / 吃饱实惠 ¥40.0；
+- `query-store-coupons` 该门店返回空（已降级）；`list-nutrition-foods` 服务端暂未开放（已降级说明）。
+
+MCP 客户端由 `requests` 改为标准库 `urllib` 实现，**零第三方依赖**，便于参赛者直接运行、评审复现。
+
+## 6. 合规与发布
 
 - `CONTEST_DECLARATION.md` 原样使用官方内容；仓库内无任何真实 Token/密钥，配置仅 `${MCD_MCP_TOKEN}` 占位符。
 - 通过 WorkBuddy 协助创建公开 GitHub 仓库、提交全部文件，并按官方格式发布报名 Issue（标题与正文间不加换行、项目地址用纯文本 URL）。
